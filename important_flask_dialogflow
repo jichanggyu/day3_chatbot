@@ -1,0 +1,128 @@
+#다이아플로우와 프라스크를 이용해서 슬랙봇에 물어봤을때 다이아플로그를 통해서 검색어를 판별하고 챗봇 기능
+
+import requests
+import json
+import os
+import re
+import urllib.request
+
+from bs4 import BeautifulSoup
+from slackclient import SlackClient
+from flask import Flask, request, make_response, render_template, jsonify
+
+#slack에 있는거 복사해서 붙여넣기
+slack_token = "xoxb-503818135714-508508643831-of06UM4qGE3CaeSZFjHNiVnG"
+slack_client_id = "503818135714.508506329079"
+slack_client_secret = "fae1fc63e86a3453ca4636ba4d0af38b"
+slack_verification = "afk30m6BZF89tAPmudlZeRUL"
+sc = SlackClient(slack_token) #이건 대충 slack에 chatbot을 뜻한다
+app = Flask(__name__)
+app.config['JSON_AS_ASCII'] = False
+
+#여기서부터 벅스 실시간 음악차트를 불러오는 함수 정의 _crawl_naver_keywords
+def _crawl_naver_keywords(text):  
+    keywords = ["Bugs 실시간 음악 차트 Top 10\n\n"]
+    titles = []
+    singers = []
+    # 여기에 함수를 구현해봅시다.
+    if text.find('music') != -1:
+        source = urllib.request.urlopen(
+            'https://music.bugs.co.kr/chart/track/realtime/total?wl_ref=M_contents_03_01').read()
+        soup = BeautifulSoup(source, "html.parser")
+        for title_text in soup.find_all("p", class_="title"):
+            titles.append(title_text.get_text())
+        for singer_text in soup.find_all("p", class_="artist"):
+            singers.append(singer_text.get_text())
+    titles = titles[:10]
+    singers = singers[:10]
+
+    for i in range(1, 11):
+        titles[i - 1] = titles[i - 1].strip()
+        singers[i - 1] = singers[i - 1].strip()
+        keywords.append(str(i) + "위:" + titles[i - 1] + "/" + singers[i - 1])
+
+    # 한글 지원을 위해 앞에 unicode u를 붙혀준다.
+    return u'\n'.join(keywords)
+#keywords로 그 원하는 결과값을 출력
+
+
+def get_answer(text, user_key):
+    #query는 우리가 쓴 글 chatbot에 벅스알려줘 ~ 이런거
+    #lang은 언어
+    data_send = {
+        'query': text,
+        'sessionId': user_key,
+        'lang': 'ko',
+    }
+    
+    #Authorization에서 뒷부분 영어 숫자는 dialogflow에서 가져옴
+    data_header = {
+        'Authorization': 'Bearer 92458223540943c9aad85cd49e59e9a6',
+        'Content-Type': 'application/json; charset=utf-8'
+    }
+
+    dialogflow_url = 'https://api.dialogflow.com/v1/query?v=20150910'
+    res = requests.post(dialogflow_url, data=json.dumps(data_send), headers=data_header)
+
+    if res.status_code != requests.codes.ok:
+        return '오류가 발생했습니다.'
+    #speech는 그 우리가 결과값 ~~입니다
+    #intent는 우리가 구별하는거 여기서는 music
+    data_receive = res.json()
+    result = {
+        "speech" : data_receive['result']['fulfillment']['speech'],
+        "intent" : data_receive['result']['metadata']['intentName']
+    }
+    return result
+
+def _event_handler(event_type, slack_event):
+    print(slack_event["event"])
+
+    if event_type == "app_mention":
+        channel = slack_event["event"]["channel"]
+        text = slack_event["event"]["text"]
+        userid = 'session'
+        #get_answer를 이용해서 text즉 챗봇에서의 벅스 알려줘 이런걸 가져오는거
+        textt = get_answer(text, userid)
+        #intent가 필요하니깐 textt['intent']를 했음
+        keywords = _crawl_naver_keywords(textt['intent'])
+        sc.api_call(
+            "chat.postMessage",
+            channel=channel,
+            text=keywords
+        )
+
+        return make_response("App mention message has been sent", 200, )
+
+    # ============= Event Type Not Found! ============= #
+    # If the event_type does not have a handler
+    message = "You have not added an event handler for the %s" % event_type
+    # Return a helpful error message
+    return make_response(message, 200, {"X-Slack-No-Retry": 1})
+
+
+@app.route("/listening", methods=["GET", "POST"])
+def hears():
+    slack_event = json.loads(request.data)
+
+    if "challenge" in slack_event:
+        return make_response(slack_event["challenge"], 200, {"content_type":
+                                                                 "application/json"
+                                                             })
+
+    if slack_verification != slack_event.get("token"):
+        message = "Invalid Slack verification token: %s" % (slack_event["token"])
+        make_response(message, 403, {"X-Slack-No-Retry": 1})
+
+    if "event" in slack_event:
+        event_type = slack_event["event"]["type"]
+        return _event_handler(event_type, slack_event)
+
+    # If our bot hears things that are not events we've subscribed to,
+    # send a quirky but helpful error response
+    return make_response("[NO EVENT IN SLACK REQUEST] These are not the droids\
+                         you're looking for.", 404, {"X-Slack-No-Retry": 1})
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0')
